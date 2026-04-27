@@ -12,8 +12,18 @@ A Streamlit app for unsupervised text mining on CSV feedback data.
 
 ## Setup
 
-1. Create and activate a virtual environment.
-2. Install dependencies:
+### 1. Create Virtual Environment
+
+```bash
+python -m venv .venv
+```
+
+### 2. Activate Virtual Environment
+
+- **Windows**: `.venv\Scripts\activate`
+- **Mac/Linux**: `source .venv/bin/activate`
+
+### 3. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -21,9 +31,13 @@ pip install -r requirements.txt
 
 ## Run
 
+Activate the virtual environment (if not already active), then run:
+
 ```bash
 streamlit run app.py
 ```
+
+The app will open in your browser at `http://localhost:8501`.
 
 ## Notes
 

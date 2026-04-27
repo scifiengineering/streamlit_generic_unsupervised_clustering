@@ -45,7 +45,13 @@ def bootstrap_nltk() -> None:
 @st.cache_data
 def read_uploaded_csv(uploaded_bytes: bytes) -> pd.DataFrame:
     text = uploaded_bytes.decode("utf-8", errors="replace")
-    return pd.read_csv(StringIO(text))
+    return pd.read_csv(
+        StringIO(text),
+        quoting=1,
+        quotechar='"',
+        skipinitialspace=True,
+        on_bad_lines="skip",
+    )
 
 
 @st.cache_data
@@ -76,7 +82,9 @@ def preprocess_texts(texts: list[str]) -> list[str]:
 
 
 @st.cache_data
-def run_lda(cleaned_docs: list[str], num_topics: int, random_state: int) -> list[tuple[int, str]]:
+def run_lda(
+    cleaned_docs: list[str], num_topics: int, random_state: int
+) -> list[tuple[int, str]]:
     tokenized_docs = [doc.split() for doc in cleaned_docs if doc.strip()]
     dictionary = corpora.Dictionary(tokenized_docs)
     corpus = [dictionary.doc2bow(tokens) for tokens in tokenized_docs]
@@ -92,7 +100,9 @@ def run_lda(cleaned_docs: list[str], num_topics: int, random_state: int) -> list
 
 
 @st.cache_data
-def build_elbow_plot(cleaned_docs: list[str], max_k: int, random_state: int) -> tuple[list[int], list[float]]:
+def build_elbow_plot(
+    cleaned_docs: list[str], max_k: int, random_state: int
+) -> tuple[list[int], list[float]]:
     vectorizer = TfidfVectorizer()
     matrix = vectorizer.fit_transform(cleaned_docs)
 
@@ -105,6 +115,40 @@ def build_elbow_plot(cleaned_docs: list[str], max_k: int, random_state: int) -> 
         inertias.append(float(model.inertia_))
 
     return ks, inertias
+
+
+@st.cache_data
+def find_optimal_k(cleaned_docs: list[str], max_k: int, random_state: int) -> int:
+    """Find optimal K using the elbow method with rate of change."""
+    ks, inertias = build_elbow_plot(cleaned_docs, max_k, random_state)
+
+    if len(ks) < 3:
+        return ks[0]
+
+    # Calculate second differences to find elbow
+    first_diffs = [inertias[i] - inertias[i + 1] for i in range(len(inertias) - 1)]
+    second_diffs = [
+        first_diffs[i] - first_diffs[i + 1] for i in range(len(first_diffs) - 1)
+    ]
+
+    # Find the point with max second difference (the elbow)
+    if second_diffs:
+        elbow_idx = second_diffs.index(max(second_diffs)) + 2
+        return ks[elbow_idx]
+    return ks[0]
+
+
+@st.cache_data
+def suggest_optimal_topics(num_docs: int) -> int:
+    """Suggest optimal number of topics based on document count."""
+    if num_docs < 50:
+        return 3
+    elif num_docs < 100:
+        return 4
+    elif num_docs < 500:
+        return 5
+    else:
+        return min(8, max(5, num_docs // 100))
 
 
 @st.cache_data
@@ -130,7 +174,9 @@ try:
     uploaded_bytes = uploaded_file.getvalue()
     source_df = read_uploaded_csv(uploaded_bytes)
 except Exception as exc:
-    st.error(f"Failed to read CSV: {exc}")
+    st.error(
+        f"Failed to read CSV: {exc}. Try ensuring proper quoting and commas in text are within quotes."
+    )
     st.stop()
 
 if source_df.empty:
@@ -138,12 +184,23 @@ if source_df.empty:
     st.stop()
 
 candidate_columns = [
-    col for col in source_df.columns if source_df[col].dtype == "object" or str(source_df[col].dtype).startswith("string")
+    col
+    for col in source_df.columns
+    if source_df[col].dtype == "object"
+    or str(source_df[col].dtype).startswith("string")
 ]
 if not candidate_columns:
     candidate_columns = source_df.columns.tolist()
 
-selected_col = st.selectbox("Select the feedback/text column", options=candidate_columns)
+# Auto-select feedback column if it exists, otherwise use the first/only column
+if "feedback" in candidate_columns:
+    selected_col = "feedback"
+elif len(candidate_columns) == 1:
+    selected_col = candidate_columns[0]
+else:
+    selected_col = st.selectbox(
+        "Select the feedback/text column", options=candidate_columns
+    )
 
 work_df = source_df[[selected_col]].copy()
 work_df.columns = ["text"]
@@ -158,21 +215,23 @@ st.success(f"Loaded {len(work_df)} text rows from '{selected_col}'.")
 
 with st.sidebar:
     st.subheader("Analysis Settings")
-    topic_count = st.slider("Number of Topics", min_value=2, max_value=10, value=4)
-    seed = st.number_input("Random State", min_value=0, max_value=9999, value=42, step=1)
+    seed = st.number_input(
+        "Random State", min_value=0, max_value=9999, value=42, step=1
+    )
+
+# Auto-select optimal number of topics
+topic_count = suggest_optimal_topics(len(work_df))
+st.sidebar.info(f"**Topics Auto-Selected:** {topic_count}")
 
 max_k_allowed = min(10, len(work_df))
 if max_k_allowed < 2:
     st.error("At least 2 text rows are required for K-Means clustering.")
     st.stop()
 
-with st.sidebar:
-    final_k = st.slider("Final K (Clusters)", min_value=2, max_value=max_k_allowed, value=min(4, max_k_allowed))
-
 run_clicked = st.button("Run Analysis", type="primary")
 
 if not run_clicked:
-    st.info("Set your options and click Run Analysis.")
+    st.info("Click Run Analysis to begin.")
     st.stop()
 
 with st.spinner("Preprocessing text..."):
@@ -186,16 +245,23 @@ if len(valid_idx) < 2:
 analysis_df = work_df.iloc[valid_idx].copy()
 analysis_df["cleaned_text"] = [cleaned_docs[i] for i in valid_idx]
 
-max_k_after_clean = min(10, len(analysis_df))
-if final_k > max_k_after_clean:
-    final_k = max_k_after_clean
-    st.warning(f"Final K adjusted to {final_k} based on available rows.")
+# Compute optimal K
+optimal_k = find_optimal_k(
+    analysis_df["cleaned_text"].tolist(),
+    min(10, len(analysis_df)),
+    int(seed),
+)
+st.sidebar.info(f"**Optimal K Auto-Detected:** {optimal_k} clusters")
 
-preview_tab, lda_tab, cluster_tab = st.tabs(["Data Preview", "Topic Modeling", "Clustering"])
+preview_tab, lda_tab, cluster_tab = st.tabs(
+    ["Data Preview", "Topic Modeling", "Clustering"]
+)
 
 with preview_tab:
-    st.subheader("Cleaned Data Preview")
-    st.dataframe(analysis_df, use_container_width=True)
+    st.subheader("Cleaned Feedback Text Preview")
+    preview_df = analysis_df[["cleaned_text"]].copy()
+    preview_df.columns = ["cleaned_feedback"]
+    st.dataframe(preview_df, use_container_width=True)
 
 with lda_tab:
     st.subheader("LDA Topics")
@@ -224,8 +290,10 @@ with cluster_tab:
     ax.grid(alpha=0.25)
     st.pyplot(fig)
 
-    labels = run_kmeans(analysis_df["cleaned_text"].tolist(), final_k, int(seed))
-    result_df = analysis_df.copy()
+    st.info(f"**Clustering with K = {optimal_k} clusters**")
+    labels = run_kmeans(analysis_df["cleaned_text"].tolist(), optimal_k, int(seed))
+    result_df = analysis_df[["cleaned_text"]].copy()
+    result_df.columns = ["cleaned_feedback"]
     result_df["cluster_id"] = labels
 
     st.subheader("Clustered Results")
