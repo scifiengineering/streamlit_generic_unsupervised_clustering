@@ -4,10 +4,11 @@ from io import StringIO
 
 import matplotlib.pyplot as plt
 import nltk
+import numpy as np
 import pandas as pd
 import streamlit as st
 from gensim import corpora
-from gensim.models import LdaModel
+from gensim.models import LdaModel, Word2Vec
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
@@ -118,6 +119,64 @@ def build_elbow_plot(
 
 
 @st.cache_data
+def train_word2vec(cleaned_docs: list[str], vector_size: int = 100, window: int = 5, min_count: int = 1) -> Word2Vec:
+    """Train a Word2Vec model on cleaned documents."""
+    tokenized_docs = [doc.split() for doc in cleaned_docs if doc.strip()]
+    if not tokenized_docs:
+        raise ValueError("No valid documents to train Word2Vec model")
+    w2v_model = Word2Vec(
+        sentences=tokenized_docs,
+        vector_size=vector_size,
+        window=window,
+        min_count=min_count,
+        workers=4,
+        seed=42
+    )
+    return w2v_model
+
+
+@st.cache_data
+def get_word2vec_vectors(cleaned_docs: list[str], w2v_model: Word2Vec) -> np.ndarray:
+    """Convert documents to vectors by averaging Word2Vec embeddings."""
+    vectors = []
+    vector_size = w2v_model.vector_size
+    
+    for doc in cleaned_docs:
+        tokens = doc.split()
+        if not tokens:
+            vectors.append(np.zeros(vector_size))
+            continue
+        
+        valid_vectors = []
+        for token in tokens:
+            if token in w2v_model.wv:
+                valid_vectors.append(w2v_model.wv[token])
+        
+        if valid_vectors:
+            avg_vector = np.mean(valid_vectors, axis=0)
+        else:
+            avg_vector = np.zeros(vector_size)
+        
+        vectors.append(avg_vector)
+    
+    return np.array(vectors)
+
+
+@st.cache_data
+def build_elbow_plot_w2v(vectors: np.ndarray, max_k: int, random_state: int) -> tuple[list[int], list[float]]:
+    """Build elbow plot using Word2Vec vectors."""
+    ks = list(range(2, max_k + 1))
+    inertias: list[float] = []
+    
+    for k in ks:
+        model = KMeans(n_clusters=k, random_state=random_state, n_init=10)
+        model.fit(vectors)
+        inertias.append(float(model.inertia_))
+    
+    return ks, inertias
+
+
+@st.cache_data
 def find_optimal_k(cleaned_docs: list[str], max_k: int, random_state: int) -> int:
     """Find optimal K using the elbow method with rate of change."""
     ks, inertias = build_elbow_plot(cleaned_docs, max_k, random_state)
@@ -125,13 +184,30 @@ def find_optimal_k(cleaned_docs: list[str], max_k: int, random_state: int) -> in
     if len(ks) < 3:
         return ks[0]
 
-    # Calculate second differences to find elbow
     first_diffs = [inertias[i] - inertias[i + 1] for i in range(len(inertias) - 1)]
     second_diffs = [
         first_diffs[i] - first_diffs[i + 1] for i in range(len(first_diffs) - 1)
     ]
 
-    # Find the point with max second difference (the elbow)
+    if second_diffs:
+        elbow_idx = second_diffs.index(max(second_diffs)) + 2
+        return ks[elbow_idx]
+    return ks[0]
+
+
+@st.cache_data
+def find_optimal_k_w2v(vectors: np.ndarray, max_k: int, random_state: int) -> int:
+    """Find optimal K for Word2Vec vectors."""
+    ks, inertias = build_elbow_plot_w2v(vectors, max_k, random_state)
+
+    if len(ks) < 3:
+        return ks[0]
+
+    first_diffs = [inertias[i] - inertias[i + 1] for i in range(len(inertias) - 1)]
+    second_diffs = [
+        first_diffs[i] - first_diffs[i + 1] for i in range(len(first_diffs) - 1)
+    ]
+
     if second_diffs:
         elbow_idx = second_diffs.index(max(second_diffs)) + 2
         return ks[elbow_idx]
@@ -153,14 +229,22 @@ def suggest_optimal_topics(num_docs: int) -> int:
 
 @st.cache_data
 def run_kmeans(cleaned_docs: list[str], k: int, random_state: int) -> list[int]:
+    """Run K-Means clustering using TF-IDF vectors."""
     vectorizer = TfidfVectorizer()
     matrix = vectorizer.fit_transform(cleaned_docs)
     model = KMeans(n_clusters=k, random_state=random_state, n_init=10)
     return model.fit_predict(matrix).tolist()
 
 
+@st.cache_data
+def run_kmeans_w2v(vectors: np.ndarray, k: int, random_state: int) -> list[int]:
+    """Run K-Means clustering using Word2Vec vectors."""
+    model = KMeans(n_clusters=k, random_state=random_state, n_init=10)
+    return model.fit_predict(vectors).tolist()
+
+
 st.title("Generic Unsupervised Text Mining and Clustering")
-st.caption("Upload any CSV, pick a text column, and run LDA plus K-Means analysis.")
+st.caption("Upload any CSV, pick a text column, and run LDA plus K-Means analysis with TF-IDF or Word2Vec.")
 
 bootstrap_nltk()
 
@@ -192,7 +276,6 @@ candidate_columns = [
 if not candidate_columns:
     candidate_columns = source_df.columns.tolist()
 
-# Auto-select feedback column if it exists, otherwise use the first/only column
 if "feedback" in candidate_columns:
     selected_col = "feedback"
 elif len(candidate_columns) == 1:
@@ -219,7 +302,6 @@ with st.sidebar:
         "Random State", min_value=0, max_value=9999, value=42, step=1
     )
 
-# Auto-select optimal number of topics
 topic_count = suggest_optimal_topics(len(work_df))
 st.sidebar.info(f"**Topics Auto-Selected:** {topic_count}")
 
@@ -245,7 +327,6 @@ if len(valid_idx) < 2:
 analysis_df = work_df.iloc[valid_idx].copy()
 analysis_df["cleaned_text"] = [cleaned_docs[i] for i in valid_idx]
 
-# Compute optimal K
 optimal_k = find_optimal_k(
     analysis_df["cleaned_text"].tolist(),
     min(10, len(analysis_df)),
@@ -274,35 +355,79 @@ with lda_tab:
     st.dataframe(pd.DataFrame(topic_rows), use_container_width=True)
 
 with cluster_tab:
-    st.subheader("Elbow Plot and Cluster Assignment")
-    with st.spinner("Running K-Means..."):
-        elbow_ks, elbow_inertias = build_elbow_plot(
-            analysis_df["cleaned_text"].tolist(),
-            min(10, len(analysis_df)),
-            int(seed),
+    tfidf_subtab, w2v_subtab = st.tabs(["TF-IDF Results", "Word2Vec Results"])
+    
+    with tfidf_subtab:
+        st.subheader("TF-IDF: Elbow Plot and Cluster Assignment")
+        with st.spinner("Running TF-IDF K-Means..."):
+            elbow_ks, elbow_inertias = build_elbow_plot(
+                analysis_df["cleaned_text"].tolist(),
+                min(10, len(analysis_df)),
+                int(seed),
+            )
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(elbow_ks, elbow_inertias, marker="o", color="blue")
+        ax.set_xlabel("k")
+        ax.set_ylabel("Inertia")
+        ax.set_title("TF-IDF: Elbow Plot")
+        ax.grid(alpha=0.25)
+        st.pyplot(fig)
+
+        st.info(f"**TF-IDF Clustering with K = {optimal_k} clusters**")
+        labels_tfidf = run_kmeans(analysis_df["cleaned_text"].tolist(), optimal_k, int(seed))
+        result_df_tfidf = analysis_df[["cleaned_text"]].copy()
+        result_df_tfidf.columns = ["cleaned_feedback"]
+        result_df_tfidf["cluster_id"] = labels_tfidf
+
+        st.subheader("TF-IDF Clustered Results")
+        st.dataframe(result_df_tfidf, use_container_width=True)
+
+        csv_bytes_tfidf = result_df_tfidf.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download TF-IDF clustered CSV",
+            data=csv_bytes_tfidf,
+            file_name="clustered_results_tfidf.csv",
+            mime="text/csv",
         )
+    
+    with w2v_subtab:
+        st.subheader("Word2Vec: Elbow Plot and Cluster Assignment")
+        with st.spinner("Training Word2Vec model..."):
+            w2v_model = train_word2vec(analysis_df["cleaned_text"].tolist())
+        
+        with st.spinner("Converting documents to Word2Vec vectors..."):
+            w2v_vectors = get_word2vec_vectors(analysis_df["cleaned_text"].tolist(), w2v_model)
+        
+        with st.spinner("Running Word2Vec K-Means..."):
+            elbow_ks_w2v, elbow_inertias_w2v = build_elbow_plot_w2v(
+                w2v_vectors,
+                min(10, len(analysis_df)),
+                int(seed),
+            )
+            optimal_k_w2v = find_optimal_k_w2v(w2v_vectors, min(10, len(analysis_df)), int(seed))
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(elbow_ks, elbow_inertias, marker="o")
-    ax.set_xlabel("k")
-    ax.set_ylabel("Inertia")
-    ax.set_title("Elbow Plot")
-    ax.grid(alpha=0.25)
-    st.pyplot(fig)
+        fig_w2v, ax_w2v = plt.subplots(figsize=(8, 4))
+        ax_w2v.plot(elbow_ks_w2v, elbow_inertias_w2v, marker="o", color="green")
+        ax_w2v.set_xlabel("k")
+        ax_w2v.set_ylabel("Inertia")
+        ax_w2v.set_title("Word2Vec: Elbow Plot")
+        ax_w2v.grid(alpha=0.25)
+        st.pyplot(fig_w2v)
 
-    st.info(f"**Clustering with K = {optimal_k} clusters**")
-    labels = run_kmeans(analysis_df["cleaned_text"].tolist(), optimal_k, int(seed))
-    result_df = analysis_df[["cleaned_text"]].copy()
-    result_df.columns = ["cleaned_feedback"]
-    result_df["cluster_id"] = labels
+        st.info(f"**Word2Vec Clustering with K = {optimal_k_w2v} clusters**")
+        labels_w2v = run_kmeans_w2v(w2v_vectors, optimal_k_w2v, int(seed))
+        result_df_w2v = analysis_df[["cleaned_text"]].copy()
+        result_df_w2v.columns = ["cleaned_feedback"]
+        result_df_w2v["cluster_id"] = labels_w2v
 
-    st.subheader("Clustered Results")
-    st.dataframe(result_df, use_container_width=True)
+        st.subheader("Word2Vec Clustered Results")
+        st.dataframe(result_df_w2v, use_container_width=True)
 
-    csv_bytes = result_df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="Download clustered CSV",
-        data=csv_bytes,
-        file_name="clustered_results.csv",
-        mime="text/csv",
-    )
+        csv_bytes_w2v = result_df_w2v.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download Word2Vec clustered CSV",
+            data=csv_bytes_w2v,
+            file_name="clustered_results_w2v.csv",
+            mime="text/csv",
+        )
