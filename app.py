@@ -118,7 +118,7 @@ def build_elbow_plot(
     return ks, inertias
 
 
-@st.cache_data
+@st.cache_resource
 def train_word2vec(cleaned_docs: list[str], vector_size: int = 100, window: int = 5, min_count: int = 1) -> Word2Vec:
     """Train a Word2Vec model on cleaned documents."""
     tokenized_docs = [doc.split() for doc in cleaned_docs if doc.strip()]
@@ -136,10 +136,10 @@ def train_word2vec(cleaned_docs: list[str], vector_size: int = 100, window: int 
 
 
 @st.cache_data
-def get_word2vec_vectors(cleaned_docs: list[str], w2v_model: Word2Vec) -> np.ndarray:
+def get_word2vec_vectors(cleaned_docs: list[str], _w2v_model: Word2Vec) -> np.ndarray:
     """Convert documents to vectors by averaging Word2Vec embeddings."""
     vectors = []
-    vector_size = w2v_model.vector_size
+    vector_size = _w2v_model.vector_size
     
     for doc in cleaned_docs:
         tokens = doc.split()
@@ -149,8 +149,8 @@ def get_word2vec_vectors(cleaned_docs: list[str], w2v_model: Word2Vec) -> np.nda
         
         valid_vectors = []
         for token in tokens:
-            if token in w2v_model.wv:
-                valid_vectors.append(w2v_model.wv[token])
+            if token in _w2v_model.wv:
+                valid_vectors.append(_w2v_model.wv[token])
         
         if valid_vectors:
             avg_vector = np.mean(valid_vectors, axis=0)
